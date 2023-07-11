@@ -118,15 +118,15 @@ class COCODataSet(DetDataset):
                                    im_fname) if image_dir else im_fname
             is_empty = False
             if not os.path.exists(im_path):
+                continue
                 logger.warning('Illegal image file: {}, and it will be '
                                'ignored'.format(im_path))
-                continue
 
             if im_w < 0 or im_h < 0:
+                continue
                 logger.warning('Illegal width: {} or height: {} in annotation, '
                                'and im_id: {} will be ignored'.format(
                                    im_w, im_h, img_id))
-                continue
 
             coco_rec = {
                 'im_file': im_path,
@@ -325,15 +325,15 @@ class SlicedCOCODataSet(COCODataSet):
                                    im_fname) if image_dir else im_fname
             is_empty = False
             if not os.path.exists(im_path):
+                continue
                 logger.warning('Illegal image file: {}, and it will be '
                                'ignored'.format(im_path))
-                continue
 
             if im_w < 0 or im_h < 0:
+                continue
                 logger.warning('Illegal width: {} or height: {} in annotation, '
                                'and im_id: {} will be ignored'.format(
                                    im_w, im_h, img_id))
-                continue
 
             slice_image_result = sahi.slicing.slice_image(
                 image=im_path,
@@ -428,15 +428,15 @@ class SemiCOCODataSet(COCODataSet):
                                    im_fname) if image_dir else im_fname
             is_empty = False
             if not os.path.exists(im_path):
+                continue
                 logger.warning('Illegal image file: {}, and it will be '
                                'ignored'.format(im_path))
-                continue
 
             if im_w < 0 or im_h < 0:
+                continue
                 logger.warning('Illegal width: {} or height: {} in annotation, '
                                'and im_id: {} will be ignored'.format(
                                    im_w, im_h, img_id))
-                continue
 
             coco_rec = {
                 'im_file': im_path,

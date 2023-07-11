@@ -47,10 +47,11 @@ from ppdet.utils.fuse_utils import fuse_conv_bn
 from ppdet.utils import profiler
 from ppdet.modeling.post_process import multiclass_nms
 
-from .callbacks import Callback, ComposeCallback, LogPrinter, Checkpointer, WiferFaceEval, VisualDLWriter, SniperProposalsGenerator, WandbCallback
+from .callbacks import Callback, ComposeCallback, Printer, LogPrinter, Checkpointer, WiferFaceEval, VisualDLWriter, SniperProposalsGenerator, WandbCallback
 from .export_utils import _dump_infer_config, _prune_input_spec, apply_to_static
 
 from paddle.distributed.fleet.utils.hybrid_parallel_util import fused_allreduce_gradients
+from paddle.device.cuda.graphs import CUDAGraph
 
 from ppdet.utils.logger import setup_logger
 logger = setup_logger('ppdet.engine')
@@ -215,7 +216,7 @@ class Trainer(object):
 
     def _init_callbacks(self):
         if self.mode == 'train':
-            self._callbacks = [LogPrinter(self), Checkpointer(self)]
+            self._callbacks = [LogPrinter(self), Checkpointer(self), Printer(self)]
             if self.cfg.get('use_vdl', False):
                 self._callbacks.append(VisualDLWriter(self))
             if self.cfg.get('save_proposals', False):
@@ -382,6 +383,7 @@ class Trainer(object):
     def register_callbacks(self, callbacks):
         callbacks = [c for c in list(callbacks) if c is not None]
         for c in callbacks:
+            print(c)
             assert isinstance(c, Callback), \
                     "metrics shoule be instances of subclass of Metric"
         self._callbacks.extend(callbacks)
@@ -418,6 +420,84 @@ class Trainer(object):
             self.start_epoch = load_weight(self.model, weights, self.optimizer,
                                            self.ema if self.use_ema else None)
         logger.debug("Resume weights of epoch {}".format(self.start_epoch))
+
+    def amp_step(self, model, use_fused_allreduce_gradients, data, scaler, the_scaled_loss):
+        print("normal amp step")
+        if isinstance(
+                model, paddle.
+                DataParallel) and use_fused_allreduce_gradients:
+            with model.no_sync():
+                with paddle.amp.auto_cast(
+                        enable=self.cfg.use_gpu or
+                        self.cfg.use_npu or self.cfg.use_mlu,
+                        custom_white_list=self.custom_white_list,
+                        custom_black_list=self.custom_black_list,
+                        level=self.amp_level):
+                    # model forward
+                    outputs = model(data)
+                    loss = outputs['loss']
+                # model backward
+                scaled_loss = scaler.scale(loss)
+                scaled_loss.backward()
+            fused_allreduce_gradients(
+                list(model.parameters()), None)
+        else:
+            with paddle.amp.auto_cast(
+                    enable=self.cfg.use_gpu or self.cfg.use_npu or
+                    self.cfg.use_mlu,
+                    custom_white_list=self.custom_white_list,
+                    custom_black_list=self.custom_black_list,
+                    level=self.amp_level):
+                # model forward
+                outputs = model(data)
+                loss = outputs['loss']
+            # model backward
+            scaled_loss = scaler.scale(loss)
+            scaled_loss.backward()
+        
+        the_scaled_loss.copy_(scaled_loss, False)
+        print(scaled_loss)
+        return outputs
+
+    def capture_graph(self, model, data, scaler):
+        graph = CUDAGraph()
+        graph.capture_begin()
+        with paddle.amp.auto_cast(
+                enable=self.cfg.use_gpu or self.cfg.use_npu or
+                self.cfg.use_mlu,
+                custom_white_list=self.custom_white_list,
+                custom_black_list=self.custom_black_list,
+                level=self.amp_level):
+            # model forward
+            outputs = model(data)
+            loss = outputs['loss']
+        # model backward
+        scaled_loss = scaler.scale(loss)
+        scaled_loss.backward()
+        graph.capture_end()
+        return graph
+
+    def captured_graph_replay_step(self, graph):
+        scaler.minimize(self.optimizer, scaled_loss)    
+
+
+    def clone(self, data):
+        ret = dict()
+        for k, v in data.items():
+            if isinstance(v, paddle.Tensor):
+                ret[k] = v.clone()
+            else:
+                ret[k] = v
+        return ret
+    
+    def copy(self, inp, data):
+        for k, v in data.items():
+            if isinstance(v, paddle.Tensor):
+                inp[k].copy_(v, True)
+            else:
+                inp[k] = v
+        paddle.device.cuda.synchronize()
+        
 
     def train(self, validate=False):
         assert self.mode == 'train', "Model not in 'train' mode"
@@ -472,6 +552,8 @@ class Trainer(object):
         use_fused_allreduce_gradients = self.cfg[
             'use_fused_allreduce_gradients'] if 'use_fused_allreduce_gradients' in self.cfg else False
 
+        the_scaled_loss = paddle.to_tensor(np.ones([1], dtype="float32"))
+
         for epoch_id in range(self.start_epoch, self.cfg.epoch):
             self.status['mode'] = 'train'
             self.status['epoch_id'] = epoch_id
@@ -485,41 +567,31 @@ class Trainer(object):
                 profiler.add_profiler_step(profiler_options)
                 self._compose_callback.on_step_begin(self.status)
                 data['epoch_id'] = epoch_id
+                
+                if step_id == 0:
+                    inp = self.clone(data)
+                self.copy(inp, data)
 
+                iter_tic = time.time()
                 if self.use_amp:
-                    if isinstance(
-                            model, paddle.
-                            DataParallel) and use_fused_allreduce_gradients:
-                        with model.no_sync():
-                            with paddle.amp.auto_cast(
-                                    enable=self.cfg.use_gpu or
-                                    self.cfg.use_npu or self.cfg.use_mlu,
-                                    custom_white_list=self.custom_white_list,
-                                    custom_black_list=self.custom_black_list,
-                                    level=self.amp_level):
-                                # model forward
-                                outputs = model(data)
-                                loss = outputs['loss']
-                            # model backward
-                            scaled_loss = scaler.scale(loss)
-                            scaled_loss.backward()
-                        fused_allreduce_gradients(
-                            list(model.parameters()), None)
-                    else:
-                        with paddle.amp.auto_cast(
-                                enable=self.cfg.use_gpu or self.cfg.use_npu or
-                                self.cfg.use_mlu,
-                                custom_white_list=self.custom_white_list,
-                                custom_black_list=self.custom_black_list,
-                                level=self.amp_level):
-                            # model forward
-                            outputs = model(data)
-                            loss = outputs['loss']
-                        # model backward
-                        scaled_loss = scaler.scale(loss)
-                        scaled_loss.backward()
-                    # in dygraph mode, optimizer.minimize is equal to optimizer.step
-                    scaler.minimize(self.optimizer, scaled_loss)
+
+                    outputs = self.amp_step(model, use_fused_allreduce_gradients, data, scaler, the_scaled_loss)
+                    scaler.minimize(self.optimizer, the_scaled_loss)
+                    # if step_id == 0:
+                    #     outputs = self.amp_step(model, use_fused_allreduce_gradients, data, scaler, the_scaled_loss)
+                    #     scaler.minimize(self.optimizer, the_scaled_loss)
+                    # elif step_id == 1:
+                    #     inp = self.clone(data)
+                    #     graph = CUDAGraph()
+                    #     graph.capture_begin()
+                    #     outputs = self.amp_step(model, use_fused_allreduce_gradients, inp, scaler, the_scaled_loss)
+                    #     graph.capture_end()
+                    #     scaler.minimize(self.optimizer, the_scaled_loss)
+                    # else:
+                    #     self.copy(inp, data)
+                    #     graph.replay()
+                    #     scaler.minimize(self.optimizer, the_scaled_loss)
+
                 else:
                     if isinstance(
                             model, paddle.
@@ -549,11 +621,14 @@ class Trainer(object):
                 if self._nranks < 2 or self._local_rank == 0:
                     self.status['training_staus'].update(outputs)
 
+                paddle.device.cuda.synchronize()
+                print(np.array(the_scaled_loss))
+
                 self.status['batch_time'].update(time.time() - iter_tic)
+                print(f"iter {step_id}: batch_time = {self.status['batch_time']}")
                 self._compose_callback.on_step_end(self.status)
                 if self.use_ema:
                     self.ema.update()
-                iter_tic = time.time()
 
             if self.cfg.get('unstructured_prune'):
                 self.pruner.update_params()

@@ -23,6 +23,9 @@ import six
 import copy
 import json
 
+import cupy
+from cupy.cuda.nvtx import RangePush, RangePop
+
 import paddle
 import paddle.distributed as dist
 
@@ -92,6 +95,27 @@ class ComposeCallback(object):
     def on_train_end(self, status):
         for c in self._callbacks:
             c.on_train_end(status)
+
+
+
+class Printer(Callback):
+    def __init__(self, model):
+        super(Printer, self).__init__(model)
+        self.step = 0
+
+    def on_step_begin(self, status):
+        if self.step == 0:
+            cupy.cuda.profiler.start()
+        RangePush(f"step {self.step}")
+        print(f"step {self.step}")
+
+    def on_step_end(self, status):
+        RangePop()
+        print(f"step {self.step} end")
+        self.step += 1
+
+        if self.step >= 20:
+            sys.exit(0)
 
 
 class LogPrinter(Callback):

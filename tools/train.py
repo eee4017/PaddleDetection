@@ -32,14 +32,24 @@ import paddle
 from ppdet.core.workspace import load_config, merge_config
 
 from ppdet.engine import Trainer, TrainerCot, init_parallel_env, set_random_seed, init_fleet_env
+from ppdet.engine.callbacks import Printer
 from ppdet.engine.trainer_ssod import Trainer_DenseTeacher
 
 from ppdet.slim import build_slim_model
-
 from ppdet.utils.cli import ArgsParser, merge_args
 import ppdet.utils.check as check
 from ppdet.utils.logger import setup_logger
 logger = setup_logger('train')
+
+
+paddle.set_flags(
+    {
+        'FLAGS_sync_nccl_allreduce': False,
+        'FLAGS_cudnn_deterministic': True,
+        'FLAGS_use_stream_safe_cuda_allocator': True,
+        'FLAGS_new_executor_use_cuda_graph': True,
+    }
+)
 
 
 def parse_args():

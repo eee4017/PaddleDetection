@@ -66,6 +66,7 @@ coverage.xml
 
 .idea/
 
+dataset/*
 dataset/coco/annotations
 dataset/coco/train2017
 dataset/coco/val2017
@@ -86,3 +87,6 @@ kernel_meta/
 # MAC
 *.DS_Store
 
+log/
+*.nsys-rep
+*.sqlite
